@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI 認證模擬測驗系統</title>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- FontAwesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+
+  <!-- React & ReactDOM -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  
+  <!-- Babel -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    body { background-color: #f8fafc; font-family: system-ui, -apple-system, sans-serif; }
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const SAMPLE_DATA = [
+      {
+        "id": "70",
+        "category": "複選題測試",
+        "question": "哪兩項有關生成式 AI 的影響是真實的？",
+        "options": [
+          "A. 生成式 AI 可以讓員工節省時間並提高工作效率。",
+          "B. 生成式 AI 可以為發散性的思考提供支援。",
+          "C. 生成式 AI 將人們每天在螢幕上花費的時間平均減少了 5 小時。",
+          "D. 生成式 AI 減少了人類在藝術領域進行創造的需求。"
+        ],
+        "answer": "A, B",
+        "explanation": "生成式 AI 能提升效率與輔助發散思考，但目前無證據顯示減少螢幕時間或藝術需求。"
+      },
+      {
+        "id": "77",
+        "type": "group",
+        "category": "情境題組",
+        "question": "針對作為測試中心管理員，你需要回答將資料庫上傳到 ChatGPT 進行分析存在哪些危害...",
+        "subQuestions": [
+          {
+            "id": "77-1",
+            "question": "ChatGPT 會記住帳號和密碼多長時間？",
+            "options": ["A. 它會在當前對話中記住這些資訊。", "B. 它會永久性記住這些資訊。", "C. 它會暫時儲存帳號和個人資料。"],
+            "answer": "A. 它會在當前對話中記住這些資訊。"
+          },
+          {
+            "id": "77-2",
+            "question": "在後續對話中，ChatGPT 是否可以將你的 IP 位址與這些資料相關聯？",
+            "options": ["A. 否。", "B. 是。"],
+            "answer": "A. 否。"
+          }
+        ],
+        "explanation": "ChatGPT 的隱私政策指出對話保留期限及 IP 關聯性..."
+      }
+    ];
+
+    const FormattedText = ({ text, className = "" }) => {
+      if (!text) return null;
+      let processedText = text
+        .replace(/([^\d\n])\s*(\d+[\.\．、]\s)/g, '$1\n\n$2')
+        .replace(/([^\d\n])\s*(\(\d+\)\s)/g, '$1\n\n$2');
+      
+      const paragraphs = processedText.split('\n');
+      
+      return (
+        <div className={`space-y-3 ${className}`}>
+          {paragraphs.map((para, idx) => {
+            const trimmed = para.trim();
+            if (!trimmed) return null;
+            const isListItem = /^(\d+[\.\．、]|\(\d+\))/.test(trimmed);
+            return (
+              <p key={idx} className={`${isListItem ? 'pl-4 border-l-4 border-blue-400 font-medium text-slate-700 my-2' : 'text-slate-800'} leading-relaxed whitespace-pre-wrap break-words text-lg`}>
+                {trimmed}
+              </p>
+            );
+          })}
+        </div>
+      );
+    };
+
+    const extractJSONBlock = (str) => {
+      const startIdx = str.search(/[\{\[]/);
+      if (startIdx === -1) return null;
+      
+      const openChar = str[startIdx];
+      const closeChar = openChar === '{' ? '}' : ']';
+      let depth = 0;
+      let inString = false;
+      let escapeNext = false;
+
+      for (let i = startIdx; i < str.length; i++) {
+        const char = str[i];
+        if (escapeNext) { escapeNext = false; continue; }
+        if (char === '\\') { escapeNext = true; continue; }
+        if (char === '"') { inString = !inString; continue; }
+        if (!inString) {
+          if (char === openChar) depth++;
+          else if (char === closeChar) {
+            depth--;
+            if (depth === 0) return str.substring(startIdx, i + 1);
+          }
+        }
+      }
+      return null; 
+    };
+
+    const App = () => {
+      const [appState, setAppState] = useState('upload');
+      const [showTemplateModal, setShowTemplateModal] = useState(false);
+      const [inputMode, setInputMode] = useState('file');
+      const [textInput, setTextInput] = useState('');
+      const [uploadError, setUploadError] = useState('');
+      const [uploadWarning, setUploadWarning] = useState('');
+      const [isRepairing, setIsRepairing] = useState(false); 
+      const [copyStatus, setCopyStatus] = useState('idle');
+      
+      const [allQuestions, setAllQuestions] = useState([]);
+      const [quizQuestions, setQuizQuestions] = useState([]); 
+      const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+      const [userAnswers, setUserAnswers] = useState({}); 
+      const [timeRemaining, setTimeRemaining] = useState(0); 
+      const [config, setConfig] = useState({ questionCount: 10, timeLimitMinutes: 60 });
+
+      const timerRef = useRef(null);
+
+      useEffect(() => {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }, [currentQuestionIndex, appState]);
+
+      const normalize = (val) => {
+        if (typeof val !== 'string') return '';
+        const v = val.trim();
+        const match = v.match(/^([A-Za-z0-9]+)[\.\．、]/);
+        if (match) return match[1].toUpperCase();
+        if (v.length <= 3) return v.toUpperCase();
+        return v;
+      };
+
+      const getQuestionType = (question) => {
+        if (question.type === 'multiple') return 'multiple';
+        if (question.type === 'single') return 'single';
+        if (Array.isArray(question.answer)) return 'multiple';
+        if (typeof question.answer === 'string' && (question.answer.includes(',') || question.answer.includes('，'))) {
+          return 'multiple';
+        }
+        return 'single';
+      };
+
+      const handleOptionSelect = (qId, option, type) => {
+        setUserAnswers(prev => {
+          const currentAnswer = prev[qId];
+          if (type === 'single') {
+            return { ...prev, [qId]: option };
+          } else {
+            let newAnswers = Array.isArray(currentAnswer) ? [...currentAnswer] : [];
+            if (newAnswers.includes(option)) newAnswers = newAnswers.filter(a => a !== option);
+            else newAnswers.push(option);
+            return { ...prev, [qId]: newAnswers };
+          }
+        });
+      };
+
+      const checkAnswer = (question, userAnswer) => {
+        if (!userAnswer) return false;
+        let correctRaw = Array.isArray(question.answer) ? question.answer : question.answer.split(/[,，]/).map(s => s.trim());
+        const correctKeys = correctRaw.map(normalize).sort();
+        let userRaw = Array.isArray(userAnswer) ? userAnswer : [userAnswer];
+        const userKeys = userRaw.map(normalize).sort();
+        return JSON.stringify(correctKeys) === JSON.stringify(userKeys);
+      };
+
+      const isOptionInAnswer = (question, option) => {
+        let correctRaw = Array.isArray(question.answer) ? question.answer : question.answer.split(/[,，]/).map(s => s.trim());
+        const correctKeys = correctRaw.map(normalize);
+        return correctKeys.includes(normalize(option));
+      };
+
+      const calculateStats = () => {
+        let totalPoints = 0;
+        let earnedPoints = 0;
+        
+        const processQuestion = (q) => {
+          if (q.subQuestions) {
+            q.subQuestions.forEach(subQ => processQuestion(subQ));
+          } else {
+            totalPoints++;
+            if (checkAnswer(q, userAnswers[q.id])) earnedPoints++;
+          }
+        };
+
+        quizQuestions.forEach(q => processQuestion(q));
+        
+        return {
+          score: totalPoints === 0 ? 0 : Math.round((earnedPoints / totalPoints) * 100),
+          correct: earnedPoints,
+          total: totalPoints
+        };
+      };
+
+      const looseJsonParse = (str) => {
+        let fixedStr = str;
+        fixedStr = fixedStr.replace(/\[\s*[^\{"\[\]]+\s*\{/g, '[{');
+        fixedStr = fixedStr.replace(/,\s*([\]}])/g, '$1');
+        fixedStr = fixedStr.replace(/([{,]\s*)([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*:/g, '$1"$2":');
+        return JSON.parse(fixedStr);
+      };
+      
+      const processData = (jsonData) => {
+        setUploadError(''); setUploadWarning(''); setIsRepairing(false);
+        try {
+          let data = jsonData;
+          if (typeof jsonData === 'string') {
+            let cleanJson = jsonData.trim().replace(/^\uFEFF/, '').replace(/```json/gi, '').replace(/```/g, '');
+            const extracted = extractJSONBlock(cleanJson);
+            if (extracted) cleanJson = extracted;
+            cleanJson = cleanJson.replace(/[\u201C\u201D]/g, '"').replace(/\u00A0/g, ' ');
+            
+            if (!cleanJson || cleanJson.length < 2) throw new Error("檔案內容為空或無效。");
+            
+            try { 
+              data = JSON.parse(cleanJson); 
+            } catch (e) {
+              setIsRepairing(true);
+              try { 
+                data = looseJsonParse(cleanJson); 
+                setUploadWarning("已自動修復檔案中的結構錯誤（例如移除了異常文字）。");
+              } catch (re) { 
+                throw new Error(`無法解析: ${re.message}`); 
+              }
+            }
+          }
+
+          if (data && typeof data === 'object' && !Array.isArray(data)) data = [data];
+          if (!Array.isArray(data)) throw new Error("格式錯誤：必須是陣列 [...]");
+          if (data.length === 0) throw new Error("題庫是空的");
+
+          let incompleteCount = 0;
+          const checkIncomplete = (q) => {
+              if (q.question && (q.question.includes('...') || q.question.includes('…'))) incompleteCount++;
+              if (q.subQuestions) q.subQuestions.forEach(checkIncomplete);
+          };
+          data.forEach(checkIncomplete);
+          
+          if (incompleteCount > 0) {
+            setUploadWarning(prev => (prev ? prev + " | " : "") + `注意：有 ${incompleteCount} 處內容包含刪節號 (...)，資料可能不完整。`);
+          }
+
+          setAllQuestions(data);
+          setConfig(prev => ({ ...prev, questionCount: data.length, timeLimitMinutes: 60 })); 
+          setAppState('config');
+        } catch (error) { 
+          console.error(error); 
+          setUploadError(error.message); 
+        } finally { 
+          setIsRepairing(false); 
+        }
+      };
+
+      const renderSingleQuestionCard = (q, indexPrefix = "", isReview = false, isSubQuestion = false, isMainCard = false) => {
+        const qType = getQuestionType(q);
+        const userAnswer = userAnswers[q.id];
+        const isCorrect = isReview ? checkAnswer(q, userAnswer) : null;
+        
+        const containerClass = isSubQuestion 
+          ? `bg-white p-5 rounded-xl border ${isReview ? (isCorrect ? 'border-green-200 bg-green-50/30' : 'border-red-200 bg-red-50/30') : 'border-slate-200'} mb-4`
+          : `bg-white p-6 md:p-8 rounded-2xl ${isMainCard ? 'shadow-lg' : 'shadow-sm'} border ${isReview ? (isCorrect ? 'border-green-200 bg-green-50/30' : 'border-red-200 bg-red-50/30') : 'border-slate-100'} mb-4`;
+
+        return (
+          <div key={q.id} className={containerClass}>
+            <div className="flex items-start gap-3 mb-5">
+               {indexPrefix && <span className="bg-slate-200 text-slate-600 text-xs px-2 py-1 rounded font-bold h-fit mt-1 flex-shrink-0">{indexPrefix}</span>}
+               <div className="flex-1 font-bold text-slate-800"><FormattedText text={q.question} /></div>
+               {isReview && (isCorrect ? <i className="fa-solid fa-circle-check text-green-500 text-2xl flex-shrink-0"></i> : <i className="fa-solid fa-circle-xmark text-red-500 text-2xl flex-shrink-0"></i>)}
+            </div>
+
+            <div className="space-y-3 pl-0 md:pl-2">
+              {q.options.map((option, idx) => {
+                const isSelected = qType === 'single' ? userAnswers[q.id] === option : (userAnswers[q.id] || []).includes(option);
+                let optionStyle = "border-slate-200 hover:bg-slate-50 text-slate-700";
+                
+                if (isReview) {
+                   const isOptionCorrect = isOptionInAnswer(q, option);
+                   if (isOptionCorrect) optionStyle = "border-green-500 bg-green-100 text-green-900 font-bold shadow-sm";
+                   else if (isSelected && !isOptionCorrect) optionStyle = "border-red-500 bg-red-100 text-red-900";
+                   else optionStyle = "border-slate-100 opacity-50";
+                } else {
+                   if (isSelected) optionStyle = "border-blue-500 bg-blue-50 text-blue-700 shadow-sm";
+                }
+
+                return (
+                  <button
+                    key={idx}
+                    disabled={isReview}
+                    onClick={() => handleOptionSelect(q.id, option, qType)}
+                    className={`w-full text-left p-4 rounded-xl border-2 transition-all flex items-start gap-3 ${optionStyle}`}
+                  >
+                    <div className="mt-0.5 flex-shrink-0">
+                      {qType === 'multiple' 
+                        ? (isSelected ? <i className="fa-solid fa-square-check text-xl"></i> : <i className="fa-regular fa-square text-xl text-slate-300"></i>)
+                        : (isSelected ? <i className="fa-solid fa-circle-dot text-blue-600 text-xl"></i> : <i className="fa-regular fa-circle text-xl text-slate-300"></i>)
+                      }
+                    </div>
+                    <span className={`${isReview ? 'text-base' : 'text-lg'} leading-snug`}>{option}</span>
+                  </button>
+                );
+              })}
+            </div>
+            {isReview && !isCorrect && (
+              <div className="mt-4 text-sm text-slate-500 bg-white p-3 rounded-lg border border-slate-200">
+                <span className="font-bold text-slate-700">正確答案：</span> {Array.isArray(q.answer) ? q.answer.join(', ') : q.answer}
+              </div>
+            )}
+          </div>
+        );
+      };
+
+      const handleFileUpload = (e) => {
+        const file = e.target.files[0]; if (!file) return; e.target.value = '';
+        const reader = new FileReader(); reader.onload = (ev) => processData(ev.target.result); reader.readAsText(file);
+      };
+      
+      const handleTextSubmit = () => { if (!textInput.trim()) return setUploadError("請貼上 JSON"); processData(textInput); };
+      
+      const startQuiz = () => {
+        // [重構：隨機洗牌機制] 對最外層大題進行洗牌，保持題組內的小題順序不變
+        const shuffled = [...allQuestions].sort(() => 0.5 - Math.random());
+        const selected = shuffled.slice(0, config.questionCount);
+        
+        setQuizQuestions(selected);
+        setCurrentQuestionIndex(0); 
+        setUserAnswers({}); 
+        setTimeRemaining(config.timeLimitMinutes * 60); 
+        setAppState('quiz');
+      };
+
+      useEffect(() => {
+        if (appState === 'quiz' && timeRemaining > 0) {
+          timerRef.current = setInterval(() => setTimeRemaining(p => { if (p <= 1) { clearInterval(timerRef.current); handleSubmitQuiz(); return 0; } return p - 1; }), 1000);
+        }
+        return () => clearInterval(timerRef.current);
+      }, [appState, timeRemaining]);
+
+      const handleSubmitQuiz = () => { clearInterval(timerRef.current); setAppState('result'); };
+      const formatTime = (s) => `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
+      
+      const copyToClipboard = () => {
+        const jsonString = JSON.stringify(SAMPLE_DATA, null, 2);
+        navigator.clipboard.writeText(jsonString).then(() => { setCopyStatus('copied'); setTimeout(() => setCopyStatus('idle'), 2000); });
+      };
+      
+      const downloadTemplate = () => {
+          try {
+          const jsonString = JSON.stringify(SAMPLE_DATA, null, 2);
+          const blob = new Blob([jsonString], { type: "application/json" });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a'); link.href = url; link.download = "題庫範本.json";
+          document.body.appendChild(link); link.click(); document.body.removeChild(link); URL.revokeObjectURL(url);
+        } catch (e) { setUploadError("請改用複製功能。"); }
+      };
+
+      const renderTemplateModal = () => {
+        if (!showTemplateModal) return null;
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col">
+              <div className="p-6 border-b flex justify-between items-center">
+                <h3 className="text-xl font-bold flex gap-2 items-center"><i className="fa-solid fa-file-lines text-blue-600"></i> 題庫範本</h3>
+                <button onClick={() => setShowTemplateModal(false)}><i className="fa-solid fa-xmark text-xl text-slate-400 hover:text-slate-600"></i></button>
+              </div>
+              <div className="p-6 overflow-y-auto bg-slate-50 flex-1"><pre className="bg-slate-800 text-slate-50 p-4 rounded-xl text-xs overflow-x-auto">{JSON.stringify(SAMPLE_DATA, null, 2)}</pre></div>
+              <div className="p-6 border-t flex justify-end gap-3">
+                <button onClick={copyToClipboard} className="flex items-center gap-2 px-4 py-2 bg-slate-100 rounded-lg hover:bg-slate-200 font-medium">
+                  {copyStatus === 'copied' ? <i className="fa-solid fa-circle-check text-green-600"></i> : <i className="fa-solid fa-copy"></i>} 複製
+                </button>
+                <button onClick={downloadTemplate} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium">
+                  <i className="fa-solid fa-download"></i> 下載
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      if (appState === 'upload') return (
+        <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4 relative">
+          {renderTemplateModal()}
+          <div className="bg-white p-6 md:p-8 rounded-2xl shadow-xl max-w-md w-full text-center space-y-6">
+            <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto relative">
+              {inputMode === 'file' ? <i className="fa-solid fa-upload text-blue-600 text-2xl"></i> : <i className="fa-solid fa-clipboard-list text-blue-600 text-2xl"></i>}
+              {isRepairing && <i className="fa-solid fa-wand-magic-sparkles absolute -top-2 -right-2 bg-yellow-400 text-white p-1.5 rounded-full text-xs animate-spin"></i>}
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-slate-800">載入 AI 認證題庫</h1>
+              <p className="text-slate-500 mt-2">系統已支援極限容錯解析與智慧排版</p>
+            </div>
+            <div className="space-y-3">
+              {uploadError && <div className={`border p-3 rounded-lg text-sm flex gap-2 text-left bg-red-50 border-red-200 text-red-700`}><i className="fa-solid fa-triangle-exclamation flex-shrink-0 mt-1"></i><span>{uploadError}</span></div>}
+              {uploadWarning && <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 p-3 rounded-lg text-sm flex gap-2 text-left"><i className="fa-solid fa-magnifying-glass flex-shrink-0 mt-1"></i><span>{uploadWarning}</span></div>}
+            </div>
+            <div className="flex bg-slate-100 p-1 rounded-xl">
+              <button onClick={() => setInputMode('file')} className={`flex-1 py-2 text-sm rounded-lg font-medium ${inputMode === 'file' ? 'bg-white shadow text-blue-600' : 'text-slate-500'}`}>上傳檔案</button>
+              <button onClick={() => setInputMode('text')} className={`flex-1 py-2 text-sm rounded-lg font-medium ${inputMode === 'text' ? 'bg-white shadow text-blue-600' : 'text-slate-500'}`}>直接貼上</button>
+            </div>
+            {inputMode === 'file' ? (
+              <div className="border-2 border-dashed border-slate-300 rounded-xl p-8 relative hover:bg-slate-50 transition-colors">
+                <input type="file" accept=".json" onChange={handleFileUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"/>
+                <div className="flex flex-col items-center gap-3"><i className="fa-solid fa-file-code text-slate-300 text-4xl"></i><span className="text-blue-600 text-sm font-bold">點擊選擇 .json 檔案</span></div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <textarea value={textInput} onChange={(e) => setTextInput(e.target.value)} placeholder='請貼上 JSON 內容...' className="w-full h-40 border border-slate-300 rounded-xl p-3 text-sm font-mono focus:ring-2 focus:ring-blue-500 outline-none"></textarea>
+                <button onClick={handleTextSubmit} className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold hover:bg-blue-700 transition-colors">{isRepairing?"修復中...":"解析並載入"}</button>
+              </div>
+            )}
+            <div className="pt-4 border-t border-slate-100">
+              <button onClick={() => setShowTemplateModal(true)} className="text-sm text-slate-500 hover:text-blue-600 flex items-center justify-center gap-2 mx-auto transition-colors"><i className="fa-solid fa-file-lines"></i> 取得標準格式範本</button>
+            </div>
+          </div>
+        </div>
+      );
+
+      if (appState === 'config') return (
+        <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+          <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full space-y-6">
+            <div className="text-center"><h2 className="text-2xl font-bold text-slate-800">測驗設定</h2><p className="text-slate-500 mt-1">已成功解析 {allQuestions.length} 大題</p></div>
+            <div className="space-y-6 bg-slate-50 p-6 rounded-xl border border-slate-100">
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-3">測驗範圍 (組)</label>
+                <input type="range" min="1" max={allQuestions.length} value={config.questionCount} onChange={(e) => setConfig({...config, questionCount: parseInt(e.target.value)})} className="w-full accent-blue-600"/>
+                <div className="flex justify-between text-xs text-slate-500 mt-1 font-medium"><span>1</span><span className="text-blue-600 font-black text-sm">{config.questionCount}</span><span>{allQuestions.length}</span></div>
+              </div>
+              <div>
+                <label className="block text-sm font-bold text-slate-700 mb-2">測驗時間 (分鐘)</label>
+                <input type="number" value={config.timeLimitMinutes} onChange={(e) => setConfig({...config, timeLimitMinutes: parseInt(e.target.value)})} className="w-full border border-slate-300 rounded-lg p-3 outline-none focus:ring-2 focus:ring-blue-500"/>
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={() => {setAppState('upload'); setUploadWarning('');}} className="flex-1 bg-white border-2 border-slate-200 text-slate-600 font-bold py-3 rounded-xl hover:bg-slate-50">重選</button>
+              <button onClick={startQuiz} className="flex-[2] bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 flex justify-center items-center gap-2 shadow-lg shadow-blue-200"><i className="fa-solid fa-play"></i> 開始測驗</button>
+            </div>
+          </div>
+        </div>
+      );
+
+      if (appState === 'quiz') {
+        const currentQ = quizQuestions[currentQuestionIndex];
+        const isGroup = !!currentQ.subQuestions;
+        const progress = ((currentQuestionIndex + 1) / quizQuestions.length) * 100;
+
+        return (
+          <div className="min-h-screen bg-slate-100 p-4 md:p-8">
+            <div className="max-w-4xl mx-auto space-y-6">
+              <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm">
+                <span className="bg-slate-100 px-4 py-1.5 rounded-lg text-slate-600 font-bold">大題 {currentQuestionIndex + 1} / {quizQuestions.length}</span>
+                <div className={`flex items-center gap-2 font-mono font-bold text-lg ${timeRemaining < 300 ? 'text-red-500 animate-pulse' : 'text-blue-600'}`}><i className="fa-solid fa-clock text-lg mt-0.5"></i>{formatTime(timeRemaining)}</div>
+              </div>
+              <div className="w-full bg-slate-200 h-2.5 rounded-full overflow-hidden"><div className="bg-blue-600 h-full transition-all duration-300" style={{ width: `${progress}%` }}></div></div>
+
+              {isGroup ? (
+                <div className="bg-white rounded-2xl shadow-lg overflow-hidden mb-4 border border-slate-100">
+                  <div className="bg-indigo-50/50 p-6 md:p-8 border-b border-indigo-100">
+                    <div className="flex items-center gap-2 mb-3"><i className="fa-solid fa-layer-group text-indigo-600 text-lg"></i><span className="text-indigo-600 font-bold text-sm tracking-widest">情境題組</span></div>
+                    <div className="text-lg md:text-xl text-slate-800 font-bold"><FormattedText text={currentQ.question} /></div>
+                  </div>
+                  <div className="p-6 md:p-8 bg-slate-50 space-y-8">
+                    {currentQ.subQuestions.map((subQ, idx) => renderSingleQuestionCard(subQ, `第 ${idx+1} 小題`, false, true))}
+                  </div>
+                </div>
+              ) : (
+                 renderSingleQuestionCard(currentQ, "", false, false, true)
+              )}
+
+              <div className="flex justify-between pt-4 pb-8">
+                <button onClick={() => setCurrentQuestionIndex(p => Math.max(0, p - 1))} disabled={currentQuestionIndex === 0} className="px-6 py-3 text-slate-500 font-bold disabled:opacity-30 hover:bg-slate-200 rounded-xl transition-colors">上一大題</button>
+                {currentQuestionIndex === quizQuestions.length - 1 ? 
+                  <button onClick={handleSubmitQuiz} className="bg-green-600 text-white px-8 py-3 rounded-xl font-black shadow-lg shadow-green-200 hover:bg-green-700 hover:scale-105 transition-all">交卷結算</button> : 
+                  <button onClick={() => setCurrentQuestionIndex(p => Math.min(quizQuestions.length - 1, p + 1))} className="bg-blue-600 text-white px-8 py-3 rounded-xl font-black shadow-lg shadow-blue-200 hover:bg-blue-700 hover:scale-105 transition-all">下一大題</button>
+                }
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      if (appState === 'result' || appState === 'review') {
+        const stats = calculateStats();
+        const isReview = appState === 'review';
+        return (
+          <div className="min-h-screen bg-slate-50 p-4 md:p-8">
+            <div className="max-w-4xl mx-auto space-y-6 pb-12">
+              {!isReview ? (
+                <div className="bg-white p-10 rounded-3xl shadow-xl text-center space-y-6">
+                  <h2 className="text-2xl text-slate-500 font-bold tracking-wider">測驗結算</h2>
+                  <div className="text-8xl font-black text-blue-600 drop-shadow-sm">{stats.score}<span className="text-3xl text-slate-400 font-bold ml-2">分</span></div>
+                  <div className="inline-block bg-blue-50 text-blue-800 px-6 py-2 rounded-full font-bold text-lg">
+                    答對 {stats.correct} / {stats.total} 個計分點
+                  </div>
+                  <div className="flex justify-center gap-4 pt-8 border-t border-slate-100">
+                    <button onClick={() => setAppState('review')} className="flex items-center gap-2 bg-slate-800 text-white px-8 py-4 rounded-xl font-bold hover:bg-slate-900 transition-colors shadow-lg"><i className="fa-solid fa-book-open"></i> 逐題檢討</button>
+                    <button onClick={() => setAppState('config')} className="flex items-center gap-2 bg-white border-2 border-slate-200 text-slate-700 px-8 py-4 rounded-xl font-bold hover:bg-slate-50 transition-colors"><i className="fa-solid fa-rotate-left"></i> 重新測驗</button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex justify-between items-center mb-8 sticky top-0 bg-slate-50/90 backdrop-blur-sm p-4 rounded-b-2xl z-10 border-b border-slate-200 shadow-sm">
+                  <h2 className="text-2xl font-black text-slate-800 flex items-center gap-3"><i className="fa-solid fa-book-open text-blue-600"></i> 檢討模式</h2>
+                  <button onClick={() => setAppState('result')} className="bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 px-6 py-2 rounded-lg font-bold transition-colors">返回分數</button>
+                </div>
+              )}
+
+              {isReview && <div className="space-y-10">
+                {quizQuestions.map((q, idx) => {
+                  const isGroup = !!q.subQuestions;
+                  return (
+                    <div key={q.id} className="bg-white p-6 md:p-8 rounded-2xl shadow-md border border-slate-200">
+                      <div className="mb-6 border-b border-slate-100 pb-4">
+                        <span className="bg-slate-800 text-white text-xs font-black px-3 py-1 rounded tracking-wider uppercase">大題 {idx + 1}</span>
+                        <div className="text-xl font-bold text-slate-800 mt-4"><FormattedText text={q.question} /></div>
+                      </div>
+                      
+                      {isGroup ? (
+                        <div className="space-y-6 pl-2 md:pl-6 border-l-4 border-indigo-50">
+                          {q.subQuestions.map((subQ, sIdx) => renderSingleQuestionCard(subQ, `第 ${sIdx+1} 小題`, true, true))}
+                        </div>
+                      ) : (
+                        renderSingleQuestionCard(q, "", true, false, false) 
+                      )}
+
+                      <div className="mt-8 bg-amber-50 border border-amber-100 p-5 rounded-xl">
+                        <div className="flex gap-3">
+                           <i className="fa-solid fa-lightbulb text-amber-500 text-2xl flex-shrink-0 mt-0.5"></i>
+                           <div className="text-slate-700 text-base leading-relaxed flex-1">
+                             <span className="font-black text-amber-900 block mb-2 text-lg">專家詳解：</span>
+                             <FormattedText text={q.explanation} />
+                           </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>}
+            </div>
+          </div>
+        );
+      }
+      return null;
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
